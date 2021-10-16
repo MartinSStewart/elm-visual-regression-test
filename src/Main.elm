@@ -1,12 +1,16 @@
 module Main exposing (build, finalize, main)
 
+import Base64
 import Browser
+import Bytes exposing (Bytes)
 import Codec exposing (Codec)
 import Html exposing (text)
 import Http
 import Json.Decode
 import Json.Encode
+import List.Nonempty exposing (Nonempty(..))
 import Process
+import SHA256
 import Task exposing (Task)
 import Url exposing (Url)
 import Url.Builder
@@ -17,7 +21,7 @@ key =
 
 
 type Msg
-    = PercyResponse (Result Http.Error ())
+    = PercyResponse (Result Http.Error FinalizeResponse)
 
 
 main : Program () {} Msg
@@ -36,7 +40,32 @@ main =
                     }
                     |> Task.andThen
                         (\{ data } ->
-                            Process.sleep 5000 |> Task.andThen (\() -> finalize key data.id)
+                            let
+                                resource =
+                                    "<html><body>test</body></html>"
+
+                                digest =
+                                    SHA256.fromString resource
+                            in
+                            createSnapshot
+                                key
+                                data.id
+                                { name = "test"
+                                , widths = Nonempty 500 []
+                                , minHeight = Nothing
+                                , resources =
+                                    Nonempty
+                                        { id = digest
+                                        , attributes =
+                                            { resourceUrl = "/index.html"
+                                            , isRoot = True
+                                            , mimeType = "text/html"
+                                            }
+                                        }
+                                        []
+                                }
+                                |> Task.andThen (\_ -> uploadResource key data.id resource)
+                                |> Task.andThen (\_ -> finalize key data.id)
                         )
                     |> Task.attempt PercyResponse
                 )
@@ -52,15 +81,11 @@ main =
         }
 
 
-type Hash64
-    = Hash64 String
-
-
-type alias Resource =
-    { id : Hash64
+type alias SnapshotResource =
+    { id : SHA256.Digest
     , attributes :
-        { resourceUrl : Url
-        , isRoot : Maybe Bool
+        { resourceUrl : String
+        , isRoot : Bool
         , mimeType : String
         }
     }
@@ -69,6 +94,100 @@ type alias Resource =
 percyApiDomain : String
 percyApiDomain =
     "https://percy.io/api/v1"
+
+
+uploadResource : PercyApiKey -> BuildId -> String -> Task Http.Error ()
+uploadResource (PercyApiKey apiKey) (BuildId buildId) content =
+    Http.task
+        { method = "POST"
+        , headers = [ Http.header "Authorization" ("Token " ++ apiKey) ]
+        , url = Url.Builder.crossOrigin percyApiDomain [ "builds", buildId, "resources" ] []
+        , body = Http.jsonBody (encodeUploadResource content)
+        , resolver = Http.stringResolver (resolver (Codec.succeed ()))
+        , timeout = Nothing
+        }
+
+
+encodeUploadResource : String -> Json.Encode.Value
+encodeUploadResource content =
+    Json.Encode.object
+        [ ( "data"
+          , Json.Encode.object
+                [ ( "type", Json.Encode.string "resources" )
+                , ( "id", SHA256.fromString content |> SHA256.toHex |> Json.Encode.string )
+                , ( "attributes"
+                  , Json.Encode.object
+                        [ ( "base64-content"
+                          , Base64.fromString content |> Maybe.withDefault "" |> Json.Encode.string
+                          )
+                        ]
+                  )
+                ]
+          )
+        ]
+
+
+createSnapshot :
+    PercyApiKey
+    -> BuildId
+    ->
+        { name : String
+        , widths : Nonempty Int
+        , minHeight : Maybe Int
+        , resources : Nonempty SnapshotResource
+        }
+    -> Task Http.Error ()
+createSnapshot (PercyApiKey apiKey) (BuildId buildId) data =
+    Http.task
+        { method = "POST"
+        , headers = [ Http.header "Authorization" ("Token " ++ apiKey) ]
+        , url = Url.Builder.crossOrigin percyApiDomain [ "builds", buildId, "snapshots" ] []
+        , body = Http.jsonBody (encodeCreateSnapshot data)
+        , resolver = Http.stringResolver (resolver (Codec.succeed ()))
+        , timeout = Nothing
+        }
+
+
+encodeCreateSnapshot :
+    { name : String
+    , widths : Nonempty Int
+    , minHeight : Maybe Int
+    , resources : Nonempty SnapshotResource
+    }
+    -> Json.Encode.Value
+encodeCreateSnapshot data =
+    Json.Encode.object
+        [ ( "data"
+          , Json.Encode.object
+                [ ( "type", Json.Encode.string "snapshots" )
+                , ( "attributes"
+                  , Json.Encode.object
+                        [ ( "name", Json.Encode.string data.name )
+                        , ( "widths", Json.Encode.null )
+                        , ( "minimum-height"
+                          , case data.minHeight of
+                                Just minHeight ->
+                                    Json.Encode.int minHeight
+
+                                Nothing ->
+                                    Json.Encode.null
+                          )
+                        ]
+                  )
+                , ( "relationships"
+                  , Json.Encode.object
+                        [ ( "resources"
+                          , Json.Encode.object
+                                [ ( "data"
+                                  , Json.Encode.list encodeResource (List.Nonempty.toList data.resources)
+                                  )
+                                ]
+                          )
+                        ]
+                  )
+                ]
+          )
+        ]
 
 
 type PercyApiKey
@@ -86,7 +205,7 @@ type alias BuildData =
         }
     , relationships :
         { resources :
-            { data : List Resource }
+            { data : List SnapshotResource }
         }
     }
 
@@ -146,19 +265,33 @@ encodeBuildData buildData =
         ]
 
 
-encodeResource : Resource -> Json.Encode.Value
+encodeResource : SnapshotResource -> Json.Encode.Value
 encodeResource resource =
     Json.Encode.object
         [ ( "type", Json.Encode.string "resources" )
-        , ( "id", Codec.encoder hash64Codec resource.id )
+        , ( "id", SHA256.toHex resource.id |> Json.Encode.string )
         , ( "attributes"
           , Json.Encode.object
-                [ ( "resource-url", Codec.encoder urlCodec resource.attributes.resourceUrl )
-                , ( "isRoot", Json.Encode.null )
+                [ ( "resource-url", Json.Encode.string resource.attributes.resourceUrl )
+                , ( "is-root", Json.Encode.bool resource.attributes.isRoot )
                 , ( "mimetype", Json.Encode.string resource.attributes.mimeType )
                 ]
           )
         ]
+
+
+encodeUrl : Url -> Json.Encode.Value
+encodeUrl =
+    Url.toString >> Json.Encode.string
+
+
+encodeMaybe encoder maybe =
+    case maybe of
+        Just value ->
+            encoder value
+
+        Nothing ->
+            Json.Encode.null
 
 
 urlCodec : Codec Url
@@ -174,11 +307,6 @@ urlCodec =
         )
         Url.toString
         Codec.string
-
-
-hash64Codec : Codec Hash64
-hash64Codec =
-    Codec.string |> Codec.map Hash64 (\(Hash64 a) -> a)
 
 
 build : PercyApiKey -> BuildData -> Task Http.Error BuildResponse
