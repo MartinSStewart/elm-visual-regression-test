@@ -261,11 +261,15 @@ encodeCreateSnapshot data =
                 , ( "attributes"
                   , Json.Encode.object
                         [ ( "name", Json.Encode.string data.name )
-                        , ( "widths", Json.Encode.null )
+                        , ( "widths"
+                          , List.Nonempty.toList data.widths
+                                |> List.map (clamp 10 2000)
+                                |> Json.Encode.list Json.Encode.int
+                          )
                         , ( "minimum-height"
                           , case data.minHeight of
                                 Just minHeight ->
-                                    Json.Encode.int minHeight
+                                    Json.Encode.int (clamp 10 2000 minHeight)
 
                                 Nothing ->
                                     Json.Encode.null
