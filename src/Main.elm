@@ -1,4 +1,4 @@
-module Main exposing (build, finalize, main)
+module Main exposing (main, run)
 
 import Base64
 import Browser
@@ -30,43 +30,7 @@ main =
         { init =
             \_ ->
                 ( {}
-                , build
-                    key
-                    { attributes =
-                        { branch = "main"
-                        , targetBranch = "main"
-                        }
-                    , relationships = { resources = { data = [] } }
-                    }
-                    |> Task.andThen
-                        (\{ data } ->
-                            let
-                                resource =
-                                    "<html><body>test</body></html>"
-
-                                digest =
-                                    SHA256.fromString resource
-                            in
-                            createSnapshot
-                                key
-                                data.id
-                                { name = "test"
-                                , widths = Nonempty 500 []
-                                , minHeight = Nothing
-                                , resources =
-                                    Nonempty
-                                        { id = digest
-                                        , attributes =
-                                            { resourceUrl = "/index.html"
-                                            , isRoot = True
-                                            , mimeType = "text/html"
-                                            }
-                                        }
-                                        []
-                                }
-                                |> Task.andThen (\_ -> uploadResource key data.id resource)
-                                |> Task.andThen (\_ -> finalize key data.id)
-                        )
+                , run ""
                     |> Task.attempt PercyResponse
                 )
         , update =
@@ -79,6 +43,44 @@ main =
         , view = \_ -> Html.text "test"
         , subscriptions = \_ -> Sub.none
         }
+
+
+run : String -> Task Http.Error FinalizeResponse
+run html =
+    build
+        key
+        { attributes =
+            { branch = "main"
+            , targetBranch = "main"
+            }
+        , relationships = { resources = { data = [] } }
+        }
+        |> Task.andThen
+            (\{ data } ->
+                let
+                    digest =
+                        SHA256.fromString html
+                in
+                createSnapshot
+                    key
+                    data.id
+                    { name = "test"
+                    , widths = Nonempty 500 []
+                    , minHeight = Nothing
+                    , resources =
+                        Nonempty
+                            { id = digest
+                            , attributes =
+                                { resourceUrl = "/index.html"
+                                , isRoot = True
+                                , mimeType = "text/html"
+                                }
+                            }
+                            []
+                    }
+                    |> Task.andThen (\_ -> uploadResource key data.id html)
+                    |> Task.andThen (\_ -> finalize key data.id)
+            )
 
 
 type alias SnapshotResource =
